@@ -3551,15 +3551,15 @@ const dingtalkPlugin = {
 
       ctx.log?.info(`[${account.accountId}] 启动钉钉 Stream 客户端...`);
 
-      // 启用 DWClient 内置的 autoReconnect 和 keepAlive
+      // 配置 DWClient：关闭 SDK 内置的 keepAlive，使用应用层自定义心跳
       // - autoReconnect: 连接断开时自动重连
-      // - keepAlive: 启用心跳机制，防止服务端因长时间无活动而断开连接
+      // - keepAlive: false（关闭 SDK 的激进心跳检测，避免 8 秒超时强制终止连接）
       const client = new DWClient({
         clientId: config.clientId,
         clientSecret: config.clientSecret,
         debug: config.debug || false,
         autoReconnect: true,
-        keepAlive: true,
+        keepAlive: false,
       } as any);
 
       client.registerCallbackListener(TOPIC_ROBOT, async (res: any) => {
@@ -3611,16 +3611,66 @@ const dingtalkPlugin = {
 
       let stopped = false;
       
+      // 【应用层心跳机制】自定义温和的心跳检测，避免 SDK 的激进检测
+      // - 心跳间隔：30 秒（比 SDK 的 8 秒更宽松）
+      // - 超时时间：90 秒（允许 3 次心跳丢失）
+      // - 检测方式：检查最后收到消息的时间，如果超时则主动重连
+      let lastMessageTime = Date.now();
+      const HEARTBEAT_INTERVAL = 30 * 1000; // 30 秒
+      const HEARTBEAT_TIMEOUT = 90 * 1000;  // 90 秒
+      
+      // 更新最后消息时间（每次收到消息时）
+      const originalRegisterCallbackListener = client.registerCallbackListener.bind(client);
+      client.registerCallbackListener = function(eventId: string, callback: any) {
+        return originalRegisterCallbackListener(eventId, async (res: any) => {
+          lastMessageTime = Date.now();
+          return callback(res);
+        });
+      };
+      
+      // 启动心跳检测定时器
+      const heartbeatTimer = setInterval(() => {
+        if (stopped) {
+          clearInterval(heartbeatTimer);
+          return;
+        }
+        
+        const elapsed = Date.now() - lastMessageTime;
+        
+        // 如果超过 90 秒没有收到任何消息（包括心跳），认为连接可能已断开
+        if (elapsed > HEARTBEAT_TIMEOUT) {
+          ctx.log?.warn?.(`[${account.accountId}] ⚠️ 心跳超时：已 ${Math.round(elapsed / 1000)} 秒未收到消息，触发重连...`);
+          
+          // 触发重连：先断开再重连
+          try {
+            client.disconnect();
+            ctx.log?.info?.(`[${account.accountId}] 已断开连接，等待 autoReconnect 重连...`);
+          } catch (err: any) {
+            ctx.log?.error?.(`[${account.accountId}] 断开连接时出错：${err.message}`);
+          }
+        } else if (elapsed > HEARTBEAT_INTERVAL * 2) {
+          // 超过 60 秒未收到消息，输出警告
+          ctx.log?.debug?.(`[${account.accountId}] 心跳检测：已 ${Math.round(elapsed / 1000)} 秒未收到消息`);
+        }
+      }, HEARTBEAT_INTERVAL);
+      
       // 统一的停止逻辑
       const doStop = (reason: string) => {
         if (stopped) return;
         stopped = true;
         ctx.log?.info(`[${account.accountId}] 停止钉钉 Stream 客户端 (${reason})...`);
+        
+        // 清理心跳定时器
+        if (typeof heartbeatTimer !== 'undefined') {
+          clearInterval(heartbeatTimer);
+          ctx.log?.debug?.(`[${account.accountId}] 心跳定时器已清理`);
+        }
+        
         try {
           // 【关键】调用 disconnect() 正确关闭 WebSocket 连接
           client.disconnect();
         } catch (err: any) {
-          ctx.log?.warn?.(`[${account.accountId}] 断开连接时出错: ${err.message}`);
+          ctx.log?.warn?.(`[${account.accountId}] 断开连接时出错：${err.message}`);
         }
         rt.channel.activity.record('dingtalk-connector', account.accountId, 'stop');
       };
