@@ -1264,6 +1264,7 @@ async function finishAICard(
           order: ['msgContent'],  // 只声明实际使用的字段，避免部分客户端显示空占位
         }),
       },
+      cardUpdateOptions:{updateCardDataByKey:true}
     },
   };
 
@@ -1882,7 +1883,11 @@ async function createAICardForTarget(
     const createBody = {
       cardTemplateId: AI_CARD_TEMPLATE_ID,
       outTrackId: cardInstanceId,
-      cardData: { cardParamMap: {} },
+      cardData: {
+        cardParamMap: {
+          config: JSON.stringify({ autoLayout: true }),  // 启用宽屏模式
+        },
+      },
       callbackType: 'STREAM',
       imGroupOpenSpaceModel: { supportForward: true },
       imRobotOpenSpaceModel: { supportForward: true },
